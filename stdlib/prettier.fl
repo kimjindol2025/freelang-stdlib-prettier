@@ -1,0 +1,414 @@
+/**
+ * FreeLang stdlib — prettier
+ *
+ * npm prettier 완전 대체 구현
+ * FreeLang 소스 코드 포맷터 (코드 스타일 통일)
+ *
+ * 사용 예시:
+ *   import "stdlib/prettier"
+ *
+ *   // 소스 문자열 포맷팅
+ *   let formatted = format(source)
+ *
+ *   // 파일 포맷팅 (write=true 이면 덮어쓰기)
+ *   formatFile("src/main.fl", true)
+ *
+ *   // 디렉터리 전체 포맷팅
+ *   formatDir("src/", true)
+ *
+ *   // 포맷팅 필요 여부 확인
+ *   let needsFix = check("src/utils.fl")
+ *
+ *   // 설정 불러오기 (.prettierrc.fl 또는 .prettierrc)
+ *   let cfg = getConfig(".")
+ *
+ * 네이티브 함수 (src/stdlib-prettier.ts):
+ *   prettier_format(code, configJson)           → string
+ *   prettier_format_file(filePath, configJson)  → { changed, error, stats }
+ *   prettier_format_dir(dirPath, configJson)    → { results[], total, changed, errors }
+ *   prettier_check(filePath, configJson)        → bool
+ *   prettier_read_config(startPath)             → configJson
+ *   prettier_read_ignore(startPath)             → string[]
+ *   prettier_clear_cache()                      → void
+ */
+
+// ============================================
+// 섹션 1: PrettierConfig 구조체
+// ============================================
+
+/**
+ * PrettierConfig: 포맷 옵션 구조체
+ *
+ * printWidth:     한 줄 최대 길이 (기본 80)
+ * tabWidth:       들여쓰기 공백 수 (기본 2)
+ * useTabs:        탭 사용 여부 (기본 false)
+ * semi:           세미콜론 추가 여부 (기본 false)
+ * singleQuote:    단일따옴표 사용 여부 (기본 false)
+ * trailingComma:  후행 쉼표 ("none" | "all", 기본 "none")
+ * bracketSpacing: 객체 괄호 공백 (기본 true)
+ */
+struct PrettierConfig {
+  printWidth: int,
+  tabWidth: int,
+  useTabs: bool,
+  semi: bool,
+  singleQuote: bool,
+  trailingComma: string,
+  bracketSpacing: bool
+}
+
+/**
+ * defaultConfig: 기본 PrettierConfig 반환
+ */
+fn defaultConfig() -> PrettierConfig {
+  let cfg = PrettierConfig {
+    printWidth: 80,
+    tabWidth: 2,
+    useTabs: false,
+    semi: false,
+    singleQuote: false,
+    trailingComma: "none",
+    bracketSpacing: true
+  }
+  return cfg
+}
+
+// ============================================
+// 섹션 2: FormatFileResult / FormatDirResult 구조체
+// ============================================
+
+/**
+ * FormatStats: 파일 포맷 통계
+ */
+struct FormatStats {
+  linesOriginal: int,
+  linesFormatted: int,
+  charsSaved: int
+}
+
+/**
+ * FormatFileResult: formatFile 결과
+ *
+ * changed: 포맷 변경 여부
+ * error:   오류 메시지 (없으면 "")
+ * stats:   통계 정보
+ */
+struct FormatFileResult {
+  changed: bool,
+  error: string,
+  stats: FormatStats
+}
+
+/**
+ * FormatDirEntry: formatDir 개별 파일 결과
+ */
+struct FormatDirEntry {
+  file: string,
+  changed: bool,
+  error: string
+}
+
+/**
+ * FormatDirResult: formatDir 결과
+ *
+ * results: 파일별 결과 배열
+ * total:   전체 파일 수
+ * changed: 변경된 파일 수
+ * errors:  오류 파일 수
+ */
+struct FormatDirResult {
+  results: array,
+  total: int,
+  changed: int,
+  errors: int
+}
+
+// ============================================
+// 섹션 3: 핵심 API
+// ============================================
+
+/**
+ * format: 소스 문자열을 포맷팅하여 반환
+ *
+ * 파싱 오류 발생 시 원본 그대로 반환.
+ *
+ * 예) format("fn hello(){println(\"hi\")}") → 들여쓰기된 소스
+ *
+ * @param code      포맷팅할 FreeLang 소스 문자열
+ * @param config    포맷 옵션 (null이면 기본값 사용)
+ * @returns 포맷팅된 소스 문자열
+ */
+fn format(code: string, config: any) -> string {
+  return native_call("prettier_format", [code, config])
+}
+
+/**
+ * formatFile: 파일을 포맷팅
+ *
+ * write=true 이면 파일에 즉시 덮어씀.
+ * write=false 이면 변경 여부만 확인 (check 모드).
+ *
+ * 예) formatFile("src/main.fl", true)    → 파일 포맷팅 후 저장
+ *     formatFile("src/main.fl", false)   → 변경 여부만 확인
+ *
+ * @param filePath  포맷팅할 파일 경로
+ * @param write     true이면 파일 덮어쓰기
+ * @param config    포맷 옵션 (null이면 기본값)
+ * @returns FormatFileResult { changed, error, stats }
+ */
+fn formatFile(filePath: string, write: bool, config: any) -> FormatFileResult {
+  let raw = native_call("prettier_format_file", [filePath, config, write])
+  let stats = FormatStats {
+    linesOriginal: raw.stats.linesOriginal,
+    linesFormatted: raw.stats.linesFormatted,
+    charsSaved: raw.stats.charsSaved
+  }
+  let result = FormatFileResult {
+    changed: raw.changed,
+    error: raw.error,
+    stats: stats
+  }
+  return result
+}
+
+/**
+ * formatDir: 디렉터리 내 모든 .fl/.free 파일을 포맷팅
+ *
+ * .prettierignore 파일을 탐색하여 제외 파일 적용.
+ * node_modules, .git, dist, build 디렉터리는 자동 제외.
+ *
+ * 예) formatDir("src/", true)   → 전체 포맷팅 + 저장
+ *     formatDir("src/", false)  → 포맷팅 필요 파일 목록만 확인
+ *
+ * @param dirPath   포맷팅할 디렉터리 경로
+ * @param write     true이면 파일 덮어쓰기
+ * @param config    포맷 옵션 (null이면 기본값)
+ * @returns FormatDirResult { results, total, changed, errors }
+ */
+fn formatDir(dirPath: string, write: bool, config: any) -> FormatDirResult {
+  let raw = native_call("prettier_format_dir", [dirPath, config, write])
+  let result = FormatDirResult {
+    results: raw.results,
+    total: raw.total,
+    changed: raw.changed,
+    errors: raw.errors
+  }
+  return result
+}
+
+/**
+ * check: 파일이 포맷팅이 필요한지 확인
+ *
+ * true  = 포맷팅 필요 (현재 포맷이 맞지 않음)
+ * false = 이미 올바른 포맷
+ *
+ * 파일 파싱 오류 시 false 반환 (무시).
+ *
+ * 예) check("src/utils.fl") → true (needs formatting)
+ *
+ * @param filePath  확인할 파일 경로
+ * @param config    포맷 옵션 (null이면 기본값)
+ * @returns bool (true = 포맷팅 필요)
+ */
+fn check(filePath: string, config: any) -> bool {
+  return native_call("prettier_check", [filePath, config])
+}
+
+/**
+ * getConfig: .prettierrc.fl / .prettierrc 설정 파일을 탐색하여 반환
+ *
+ * startPath에서 루트 방향으로 최대 10단계 탐색.
+ * 설정 파일을 찾지 못하면 기본값 반환.
+ *
+ * 탐색 순서: .prettierrc.fl → .prettierrc → .prettierrc.json
+ *
+ * 예) getConfig(".") → PrettierConfig { printWidth: 80, tabWidth: 2, ... }
+ *
+ * @param startPath 탐색 시작 경로 (파일 또는 디렉터리)
+ * @returns PrettierConfig
+ */
+fn getConfig(startPath: string) -> PrettierConfig {
+  let raw = native_call("prettier_read_config", [startPath])
+  let cfg = PrettierConfig {
+    printWidth: raw.printWidth,
+    tabWidth: raw.tabWidth,
+    useTabs: raw.useTabs,
+    semi: raw.semi,
+    singleQuote: raw.singleQuote,
+    trailingComma: raw.trailingComma,
+    bracketSpacing: raw.bracketSpacing
+  }
+  return cfg
+}
+
+/**
+ * getIgnorePatterns: .prettierignore 파일을 탐색하여 무시 패턴 반환
+ *
+ * 예) getIgnorePatterns(".") → ["node_modules", "dist", "*.min.fl"]
+ *
+ * @param startPath 탐색 시작 경로
+ * @returns string[] 무시 패턴 배열
+ */
+fn getIgnorePatterns(startPath: string) -> array {
+  return native_call("prettier_read_ignore", [startPath])
+}
+
+/**
+ * clearCache: 설정 파일 캐시 초기화
+ *
+ * 설정 파일이 변경되었을 때 캐시를 갱신.
+ */
+fn clearCache() -> void {
+  native_call("prettier_clear_cache", [])
+}
+
+// ============================================
+// 섹션 4: 편의 API (고수준 인터페이스)
+// ============================================
+
+/**
+ * write: 파일을 포맷팅하고 저장 (단축 API)
+ *
+ * 예) write("src/main.fl")  → 포맷팅 후 파일 저장
+ *
+ * @param filePath  포맷팅할 파일 경로
+ * @returns changed: bool (변경 여부)
+ */
+fn write(filePath: string) -> bool {
+  let cfg = getConfig(filePath)
+  let result = formatFile(filePath, true, cfg)
+  return result.changed
+}
+
+/**
+ * checkDir: 디렉터리에서 포맷팅 필요 파일 목록을 출력
+ *
+ * 출력 형식:
+ *   Checking... N files
+ *   ✓ server.fl
+ *   ✗ utils.fl (needs formatting)
+ *   Run prettier --write to fix
+ *
+ * @param dirPath   검사할 디렉터리 경로
+ * @returns needsFix: int (포맷팅 필요 파일 수)
+ */
+fn checkDir(dirPath: string) -> int {
+  let cfg = getConfig(dirPath)
+  let raw = native_call("prettier_format_dir", [dirPath, cfg, false])
+  let total = raw.total
+  let results = raw.results
+
+  println("Checking... " + str(total) + " files")
+
+  let needsFix = 0
+  let i = 0
+  while (i < total) {
+    let entry = results[i]
+    if (entry.error != "") {
+      println("  ? " + entry.file + " (parse error: " + entry.error + ")")
+    } else {
+      if (entry.changed) {
+        println("  \u2717 " + entry.file + " (needs formatting)")
+        needsFix = needsFix + 1
+      } else {
+        println("  \u2713 " + entry.file)
+      }
+    }
+    i = i + 1
+  }
+
+  if (needsFix > 0) {
+    println("Run prettier --write to fix")
+  }
+
+  return needsFix
+}
+
+/**
+ * writeDir: 디렉터리 전체를 포맷팅하고 저장 (단축 API)
+ *
+ * 출력 형식:
+ *   Formatting... N files
+ *   ✓ server.fl (formatted)
+ *   · utils.fl (no changes)
+ *   Done: 2 files changed, 1 files unchanged
+ *
+ * @param dirPath  포맷팅할 디렉터리 경로
+ * @returns changed: int (변경된 파일 수)
+ */
+fn writeDir(dirPath: string) -> int {
+  let cfg = getConfig(dirPath)
+  let raw = native_call("prettier_format_dir", [dirPath, cfg, true])
+  let total = raw.total
+  let changed = raw.changed
+  let results = raw.results
+
+  println("Formatting... " + str(total) + " files")
+
+  let i = 0
+  while (i < total) {
+    let entry = results[i]
+    if (entry.error != "") {
+      println("  ! " + entry.file + " (error: " + entry.error + ")")
+    } else {
+      if (entry.changed) {
+        println("  \u2713 " + entry.file + " (formatted)")
+      } else {
+        println("  \u00b7 " + entry.file + " (no changes)")
+      }
+    }
+    i = i + 1
+  }
+
+  let unchanged = total - changed
+  println("Done: " + str(changed) + " files changed, " + str(unchanged) + " files unchanged")
+
+  return changed
+}
+
+/**
+ * formatWithConfig: 설정 파일을 읽어 포맷팅 (단축 API)
+ *
+ * 가장 가까운 .prettierrc.fl 또는 .prettierrc 설정을 자동 탐색.
+ *
+ * 예) formatWithConfig("src/main.fl", true)
+ *
+ * @param filePath  포맷팅할 파일 경로
+ * @param write     true이면 파일 저장
+ * @returns FormatFileResult
+ */
+fn formatWithConfig(filePath: string, write: bool) -> FormatFileResult {
+  let cfg = getConfig(filePath)
+  return formatFile(filePath, write, cfg)
+}
+
+// ============================================
+// Export
+// ============================================
+
+export {
+  // 구조체
+  PrettierConfig,
+  FormatStats,
+  FormatFileResult,
+  FormatDirEntry,
+  FormatDirResult,
+
+  // 설정
+  defaultConfig,
+  getConfig,
+  getIgnorePatterns,
+  clearCache,
+
+  // 핵심 API
+  format,
+  formatFile,
+  formatDir,
+  check,
+
+  // 편의 API
+  write,
+  writeDir,
+  checkDir,
+  formatWithConfig
+}
